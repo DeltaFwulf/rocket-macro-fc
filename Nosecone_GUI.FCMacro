@@ -1,0 +1,245 @@
+import FreeCAD
+import PartDesign
+import PartDesignGui
+import Sketcher
+from PySide.QtGui import QWidget, QLabel, QLineEdit, QComboBox, QVBoxLayout, QFormLayout, QPushButton, QCheckBox, QGroupBox
+import numpy as np
+from math import pi, sqrt
+
+
+__Name__ = 'Nosecone'
+__Comment__ = 'Draws a parametric nosecone for a rocket.'
+__Author__ = 'Michael Stoll'
+__Version__ = '0.1'
+__Date__ = '2026-04-08'
+__License__ = 'License identifier from https://spdx.org/licenses/, e.g. LGPL-2.0-or-later as FreeCAD, MIT, CC0-1.0'
+__Web__ = 'https://github.com/DeltaFwulf/rocket-macro-fc'
+__Wiki__ = 'Associated wiki page'
+__Icon__ = 'MyMacro.svg, please put an svg file along side the macro, respecting the macro filename'
+__Help__ = 'Have a part file open. This macro creates the body from scratch.'
+__Status__ = 'Alpha'
+__Requires__ = 'FreeCAD >1.0.2'
+__Communication__ = 'https://github.com/DeltaFwulf/rocket-macro-fc/issues'
+__Files__ = ''
+
+# TODO: accept a 'forward' direction as +x, +y, +z, etc. to fit the user's project convention.
+# TODO: create a new document if one isn't already open
+
+class InputWindow(QWidget):
+
+	def __init__(self):	
+		
+		super(InputWindow, self).__init__()
+		self.profiles = {'conic':self.conic, 'biconic':self.biconic, 'haack':self.haack}
+		
+		self._inShape = QComboBox()
+		self._inShape.addItems([key for key in self.profiles.keys()])
+		self._inShape.currentTextChanged.connect(self.addFurtherInputFields) # this runs when a new nosecone is picked
+		self._inBaseDiameter = QLineEdit()
+		self._inFinenessRatio = QLineEdit()
+		self._inShoulderDiameter = QLineEdit()
+		self._inShoulderLength = QLineEdit()
+		self._inWallThickness = QLineEdit()
+		self._inCapShoulder = QCheckBox()
+		
+		self._makeNosecone = QPushButton("Make Nosecone")
+		self._makeNosecone.clicked.connect(self.makeNosecone)
+		
+		self.mainLayout = QVBoxLayout()
+	
+		# shared inputs are in this layout section
+		self.baseInputs = QGroupBox("Common Inputs")
+		comLayout = QFormLayout()
+		comLayout.addRow('Shape', self._inShape)
+		comLayout.addRow('Base Diameter', self._inBaseDiameter)
+		comLayout.addRow('Fineness Ratio', self._inFinenessRatio)
+		comLayout.addRow('Shoulder Diameter', self._inShoulderDiameter)
+		comLayout.addRow('Shoulder Length', self._inShoulderLength)
+		comLayout.addRow('Wall Thickness', self._inWallThickness)
+		comLayout.addRow('Capped Shoulder', self._inCapShoulder)
+		self.baseInputs.setLayout(comLayout)
+		
+		self.furtherInputs = QGroupBox("Further Inputs")
+		self.mainLayout.addWidget(self.baseInputs)
+		self.mainLayout.addWidget(self.furtherInputs)
+		self.mainLayout.addWidget(self._makeNosecone)
+		self.addFurtherInputFields()
+		self.setLayout(self.mainLayout)
+		self.show()
+		
+		
+	def addFurtherInputFields(self):
+		"""When a nosecone geometry is selected, this function runs, and adds required input fields if necessary."""
+		
+		self.mainLayout.itemAt(1).widget().deleteLater()
+	
+		furtherInputs = QGroupBox("Additional Inputs")
+		layout = QFormLayout()
+		
+		match self._inShape.currentText():
+			case 'biconic':
+				self._inSplitNorm = QLineEdit()
+				self._inMidDiameter = QLineEdit()
+				layout.addRow("Normalised split location (0 = tip, 1 = base)", self._inSplitNorm)
+				layout.addRow("Mid diameter", self._inMidDiameter)
+				
+			case 'haack':
+				self._inC = QLineEdit()
+				layout.addRow("C" , self._inC)
+		
+		furtherInputs.setLayout(layout)
+		self.mainLayout.insertWidget(1, furtherInputs)
+
+		
+	def makeNosecone(self):
+		
+		# Check common inputs	
+		try:
+			self.shape = self._inShape.currentText()
+			self.dBase = float(self._inBaseDiameter.text())
+			fRatio = float(self._inFinenessRatio.text())
+			self.lCone = fRatio*self.dBase
+			self.dShoulder = float(self._inShoulderDiameter.text())
+			self.lShoulder = float(self._inShoulderLength.text())
+			self.tWall = float(self._inWallThickness.text())
+			self.capped = self._inCapShoulder.isChecked()
+			
+		except:
+			print("One or more common inputs are missing, please check and try again.")
+			return
+			
+		# Step 1: create a body named 'nosecone'
+		body = App.activeDocument().addObject('PartDesign::Body', 'nosecone')
+		body.Label = 'nosecone'
+		body.AllowCompound = False
+		App.ActiveDocument.recompute()
+				
+		for feat in body.Origin.OriginFeatures:
+			if 'X_Axis' in feat.Name:
+				x_axis = feat
+			if 'XZ_Plane' in feat.Name:
+				sketchPlane = feat
+		
+		profileSketch = body.newObject('Sketcher::SketchObject','Sketch')
+		profileSketch.AttachmentSupport = sketchPlane
+		profileSketch.MapMode = 'FlatFace'
+		App.ActiveDocument.recompute()
+
+		# Step 3: draw the nosecone sketch	
+		self.profiles.get(self.shape)(sketch=profileSketch) # draw the nosecone profile
+		
+		# Step 4: revolve this sketch about the origin z axis 360 degrees
+		revolution = body.newObject('PartDesign::Revolution','Revolution')
+		revolution.Profile = profileSketch
+		revolution.ReferenceAxis = (App.ActiveDocument.getObject(x_axis.Name), [''])
+		revolution.Angle = 360.0
+		revolution.Reversed = 0
+		profileSketch.Visibility = False
+		App.ActiveDocument.recompute()
+		
+		# Step 5: hollow out the nosecone against the cap face (leave on if selected 'capped'
+		thickness = body.newObject('PartDesign::Thickness', 'Thickness')
+		thickness.Value = self.tWall
+		thickness.Reversed = 1
+		thickness.Mode = 0
+		thickness.Intersection = 0
+		thickness.Join = 1
+		
+		# find the base face
+		for i in range(len(body.Shape.Faces)):
+			f = body.Shape.Faces[i]
+						
+			if abs(f.CenterOfMass[0] - (self.lCone + self.lShoulder)) < 0.001 and abs(f.Area - (pi*self.dShoulder**2 / 4)) < 0.001:
+				thickness.Base = (App.ActiveDocument.ActiveObject.BaseFeature, ["Face" + str(i + 1),])
+				
+		App.ActiveDocument.recompute()
+		print("Nosecone has been created")
+		
+					
+	def conic(self):
+		"""Returns a line to add to the sketch, with the correct cone positions."""
+
+		return Part.LineSegment(App.Vector(0.0, 0.0), App.Vector(self.lCone, 0.5*self.dBase))
+		
+	
+	def biconic(self):
+		pass
+		
+			
+	def haack(self, sketch:Sketcher.Sketch, **kwargs) -> None:
+		"""Creates the solid HAACK nosecone sketch"""
+		try:
+			C = float(self._inC.text())
+		except:
+			print("Missing inputs for HAACK profile, please check and try again")
+			return None
+			
+		nPts = 50 if kwargs.get('nPoints') is None else kwargs.get('nPoints')
+		
+		theta = np.acos(1 - 2*np.linspace(0, 1, nPts, endpoint=True))
+		pts = np.zeros((nPts, 2), float)
+		pts[:, 0] = 0.5*self.lCone*(1 - np.cos(theta))
+		pts[:, 1] = 0.5*self.dBase / sqrt(pi) * np.sqrt(theta - 0.5*np.sin(2*theta) + C*np.sin(theta)**3)
+		
+		spline = self.makeBSpline(pts)
+		
+		sketch.addGeometry(spline, False)
+		sketch.addConstraint(Sketcher.Constraint('Block', 0))
+				
+		i = 1
+		for segment in self.plotInnerCurve():
+			sketch.addGeometry(segment, False)
+			sketch.addConstraint(Sketcher.Constraint('Block', i))
+			i += 1
+			
+		App.ActiveDocument.recompute()
+
+		
+			
+	def makeBSpline(self, pts:np.ndarray) -> Part.BSplineCurve:
+		"""Make a Part BSplineCurve for the array of 2D points input."""
+		
+		toInterp = [App.Vector(pts[i, 0], pts[i, 1]) for i in range(np.shape(pts)[0])]
+		
+		_finalbsp_poles = []
+		_finalbsp_knots = []
+		_finalbsp_mults = []
+		_bsps = []
+		
+		_bsps.append(Part.BSplineCurve())
+		_bsps[-1].interpolate(toInterp, PeriodicFlag=False)
+		_bsps[-1].increaseDegree(3)
+		_finalbsp_poles.extend(_bsps[-1].getPoles())
+		_finalbsp_knots.extend(_bsps[-1].getKnots())
+		_finalbsp_mults.extend(_bsps[-1].getMultiplicities())
+		
+		spline = Part.BSplineCurve(_finalbsp_poles, _finalbsp_mults, _finalbsp_knots, False, 3, None, False)
+		
+		del(_bsps)
+		del(_finalbsp_poles)
+		del(_finalbsp_knots)
+		del(_finalbsp_mults)
+		
+		return spline
+		
+		
+	def plotInnerCurve(self) -> list[Part.LineSegment]:
+		"""Returns the line segments for the inside of the nosecone and shoulder"""
+		
+		pCentreFront = App.Vector(0.0, 0.0)
+		pCentreRear = App.Vector(self.lCone + self.lShoulder, 0.0)
+		pShoulderRear = App.Vector(self.lCone + self.lShoulder, 0.5*self.dShoulder)
+		pShoulderFront = App.Vector(self.lCone, 0.5*self.dShoulder)
+		pProfileRear = App.Vector(self.lCone, 0.5*self.dBase)
+		
+		segments = []
+		segments.append(Part.LineSegment(pProfileRear, pShoulderFront))
+		segments.append(Part.LineSegment(pShoulderFront, pShoulderRear))
+		segments.append(Part.LineSegment(pShoulderRear, pCentreRear))
+		segments.append(Part.LineSegment(pCentreRear, pCentreFront))
+		
+		return segments
+		
+		
+		
+myWin = InputWindow()
