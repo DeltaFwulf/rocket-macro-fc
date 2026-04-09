@@ -6,6 +6,14 @@ from PySide.QtGui import QWidget, QLabel, QLineEdit, QComboBox, QVBoxLayout, QFo
 import numpy as np
 from math import pi, sqrt
 
+"""An automagic nosecone macro. This allows the user to select an aerodynamic profile and overall dimensions, and returns a nosecone of constant thickness, with either a capped or open shoulder base.
+   
+   Please note: at this time, the power series nosecone is unable to solve for thickness at low values of n.
+   Ogives (tangent and secant) are coming soon, as well as the option of spherically blunting the ogives and conic-type nosecones
+
+   Mathematical descriptions for the different nosecone profiles may be found here: https://en.wikipedia.org/wiki/Nose_cone_design
+"""
+
 
 __Name__ = 'Nosecone'
 __Comment__ = 'Draws a parametric nosecone for a rocket.'
@@ -13,14 +21,14 @@ __Author__ = 'Michael Stoll'
 __Version__ = '0.1'
 __Date__ = '2026-04-08'
 __License__ = 'License identifier from https://spdx.org/licenses/, e.g. LGPL-2.0-or-later as FreeCAD, MIT, CC0-1.0'
-__Web__ = 'https://github.com/DeltaFwulf/rocket-macro-fc'
+__Web__ = 'Associated web page'
 __Wiki__ = 'Associated wiki page'
 __Icon__ = 'MyMacro.svg, please put an svg file along side the macro, respecting the macro filename'
-__Help__ = 'Have a part file open. This macro creates the body from scratch.'
+__Help__ = 'A short explanation how to use the macro, e.g. what to select before launching'
 __Status__ = 'Alpha'
-__Requires__ = 'FreeCAD >1.0.2'
-__Communication__ = 'https://github.com/DeltaFwulf/rocket-macro-fc/issues'
-__Files__ = ''
+__Requires__ = 'FreeCAD >1.0'
+__Communication__ = 'e.g. https://github.com/FreeCAD/FreeCAD-macros/issues/ if on the github'
+__Files__ = 'comma-separated list of files that should be installed together with this file, use paths relative to this file, do not include this file'
 
 # TODO: accept a 'forward' direction as +x, +y, +z, etc. to fit the user's project convention.
 # TODO: create a new document if one isn't already open
@@ -30,7 +38,12 @@ class InputWindow(QWidget):
 	def __init__(self):	
 		
 		super(InputWindow, self).__init__()
-		self.profiles = {'conic':self.conic, 'biconic':self.biconic, 'haack':self.haack}
+		self.profiles = {'conic':self.conic, 
+						'biconic':self.biconic, 
+						'haack':self.haack, 
+						'elliptical':self.elliptical, 
+						'power-series':self.powerSeries,
+						'parabolic':self.parabolic}
 		
 		self._inShape = QComboBox()
 		self._inShape.addItems([key for key in self.profiles.keys()])
@@ -84,9 +97,17 @@ class InputWindow(QWidget):
 				layout.addRow("Mid diameter", self._inMidDiameter)
 				
 			case 'haack':
-				self._inC = QLineEdit()
-				layout.addRow("C" , self._inC)
-		
+				self._inC = QLineEdit()							
+				layout.addRow("C (0 to 1)" , self._inC)
+				
+			case 'power-series':
+				self._inN = QLineEdit()
+				layout.addRow("n (0 to 1)", self._inN)
+				
+			case 'parabolic':
+				self._inK = QLineEdit()
+				layout.addRow("K' (0 to 1)", self._inK)
+
 		furtherInputs.setLayout(layout)
 		self.mainLayout.insertWidget(1, furtherInputs)
 
@@ -126,8 +147,20 @@ class InputWindow(QWidget):
 		App.ActiveDocument.recompute()
 
 		# Step 3: draw the nosecone sketch	
-		self.profiles.get(self.shape)(sketch=profileSketch) # draw the nosecone profile
+		out = self.profiles.get(self.shape)(sketch=profileSketch) # draw the nosecone profile
 		
+		if out != 0:
+			print(f"Invalid inputs given for {self.shape}, check and try again.")
+			return
+		
+		i = len(profileSketch.Geometry)
+		for segment in self.plotInnerCurve():
+			profileSketch.addGeometry(segment, False)
+			profileSketch.addConstraint(Sketcher.Constraint('Block', i))
+			i += 1
+			
+		App.ActiveDocument.recompute()
+				
 		# Step 4: revolve this sketch about the origin z axis 360 degrees
 		revolution = body.newObject('PartDesign::Revolution','Revolution')
 		revolution.Profile = profileSketch
@@ -155,47 +188,110 @@ class InputWindow(QWidget):
 		App.ActiveDocument.recompute()
 		print("Nosecone has been created")
 		
-					
-	def conic(self):
-		"""Returns a line to add to the sketch, with the correct cone positions."""
-
-		return Part.LineSegment(App.Vector(0.0, 0.0), App.Vector(self.lCone, 0.5*self.dBase))
+				
+						
+	def conic(self, sketch:Sketcher.Sketch, **kwargs) -> int:
+		"""Draws the conic nosecone profile"""
 		
-	
-	def biconic(self):
-		pass
+		sketch.addGeometry(Part.LineSegment(App.Vector(0.0, 0.0), App.Vector(self.lCone, 0.5*self.dBase)), False)
+		sketch.addConstraint(Sketcher.Constraint('Block', 0))
 		
-			
-	def haack(self, sketch:Sketcher.Sketch, **kwargs) -> None:
+		return 0
+		
+		
+		
+	def biconic(self, sketch:Sketcher.Sketch, **kwargs) -> int:
+		"""Draws the biconic specific profile."""
+		
+		try:
+			xnSplit = float(self._inSplitNorm.text())
+			dMid = float(self._inMidDiameter.text())
+		except:
+			return 1
+		
+		pTip = App.Vector(0.0, 0.0)
+		pMid = App.Vector(xnSplit*self.lCone, dMid / 2)
+		pBase = App.Vector(self.lCone, self.dBase / 2)
+		
+		sketch.addGeometry(Part.LineSegment(pTip, pMid), False)
+		sketch.addGeometry(Part.LineSegment(pMid, pBase), False)
+		
+		sketch.addConstraint(Sketcher.Constraint('Block', 0))
+		sketch.addConstraint(Sketcher.Constraint('Block', 1))
+		
+		return 0
+		
+		
+				
+	def haack(self, sketch:Sketcher.Sketch, **kwargs) -> int:
 		"""Creates the solid HAACK nosecone sketch"""
 		try:
 			C = float(self._inC.text())
 		except:
-			print("Missing inputs for HAACK profile, please check and try again")
-			return None
+			return 1
 			
 		nPts = 50 if kwargs.get('nPoints') is None else kwargs.get('nPoints')
-		
 		theta = np.acos(1 - 2*np.linspace(0, 1, nPts, endpoint=True))
 		pts = np.zeros((nPts, 2), float)
 		pts[:, 0] = 0.5*self.lCone*(1 - np.cos(theta))
 		pts[:, 1] = 0.5*self.dBase / sqrt(pi) * np.sqrt(theta - 0.5*np.sin(2*theta) + C*np.sin(theta)**3)
-		
-		spline = self.makeBSpline(pts)
-		
-		sketch.addGeometry(spline, False)
+		sketch.addGeometry(self.makeBSpline(pts), False)
 		sketch.addConstraint(Sketcher.Constraint('Block', 0))
-				
-		i = 1
-		for segment in self.plotInnerCurve():
-			sketch.addGeometry(segment, False)
-			sketch.addConstraint(Sketcher.Constraint('Block', i))
-			i += 1
-			
-		App.ActiveDocument.recompute()
-
 		
+		return 0	
+		
+	
+	
+	def elliptical(self, sketch:Sketcher.Sketch, **kwargs) -> int:
+		"""Draws the elliptical nosecone curve."""
+		
+		nPts = 50 if kwargs.get('nPoints') is None else kwargs.get('nPoints')
+		pts = np.zeros((nPts, 2), float)
+		pts[:, 0] = np.linspace(0, self.lCone, nPts, endpoint=True)
+		pts[:, 1] = (self.dBase / (2*self.lCone))*np.sqrt(pts[:, 0]*(2*self.lCone - pts[:, 0]))
+		sketch.addGeometry(self.makeBSpline(pts), False)
+		sketch.addConstraint(Sketcher.Constraint('Block', 0))
+		
+		return 0
+		
+		
+	
+	def powerSeries(self, sketch:Sketcher.Sketch, **kwargs) -> int:
+		
+		try:
+			n = float(self._inN.text())
+		except:
+			return 1
 			
+		nPts = 50 if kwargs.get('nPoints') is None else kwargs.get('nPoints')
+		pts = np.zeros((nPts, 2), float)
+		pts[:, 0] = np.linspace(0, self.lCone, nPts, endpoint=True)
+		pts[:, 1] = 0.5*self.dBase*(pts[:, 0] / self.lCone)**n
+		sketch.addGeometry(self.makeBSpline(pts), False)
+		sketch.addConstraint(Sketcher.Constraint('Block', 0))
+		
+		return 0
+		
+		
+		
+	def parabolic(self, sketch:Sketcher.Sketch, **kwargs) -> int:
+		
+		try:
+			k = float(self._inK.text())
+		except:
+			return 1
+			
+		nPts = 50 if kwargs.get('nPoints') is None else kwargs.get('nPoints')
+		pts = np.zeros((nPts, 2), float)
+		pts[:, 0] = np.linspace(0, self.lCone, nPts, endpoint=True)
+		pts[:, 1] = (0.5*self.dBase / (2 - k))*(2*pts[:, 0] / self.lCone - k*(pts[:, 0] / self.lCone)**2)
+		sketch.addGeometry(self.makeBSpline(pts), False)
+		sketch.addConstraint(Sketcher.Constraint('Block', 0))
+		
+		return 0
+		
+		
+				
 	def makeBSpline(self, pts:np.ndarray) -> Part.BSplineCurve:
 		"""Make a Part BSplineCurve for the array of 2D points input."""
 		
