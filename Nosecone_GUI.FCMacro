@@ -6,6 +6,8 @@ from PySide.QtGui import QWidget, QLabel, QLineEdit, QComboBox, QVBoxLayout, QFo
 import numpy as np
 from math import pi, sqrt, sin, cos, acos, atan
 
+
+
 """
 	Overview:
 	-----------------------------------------------------------------------------------------------
@@ -20,7 +22,11 @@ from math import pi, sqrt, sin, cos, acos, atan
 	- Power Series
 	- Elliptical
 	- Parabolic
-		
+	
+	Additionally, conic, biconic, and tangent ogive nosecones may be 'spherically blunted', with a 
+	tangent spherical cap replacing the sharp tip. More blunted nosecone geometries are being added
+	as well.
+	
    	Description of Nosecone Geometry:
 	-----------------------------------------------------------------------------------------------
 	The nosecone consists of the 'profile' section, and the 'shoulder' section. The profile is the 
@@ -39,25 +45,27 @@ from math import pi, sqrt, sin, cos, acos, atan
 	-----------------------------------------------------------------------------------------------
    	- Please note: at this time, the power series nosecone is unable to solve for thickness at low 
 	  values of n.
-	- Nosecones all point along the x axis; this will be changed in coming versions.
+	- only conic, biconic, and tangent ogive are able to have spherically blunted tips as of now
 	
 	Planned Features:
 	-----------------------------------------------------------------------------------------------
 	- Addition of a NoseCone object that allow recomputation by altering data fields.
-	- Arbitrary orientation
 	- Accepting VarSet variables as inputs
+	- Spherical blunting for all nosecone types
 
 	Other:
 	-----------------------------------------------------------------------------------------------
    	For Mathematical Descriptions of profiles: https://en.wikipedia.org/wiki/Nose_cone_design
 """
 
+
+
 __Name__ = 'Nosecone'
 __Comment__ = 'Draws a parametric nosecone for a rocket.'
 __Author__ = 'Michael Stoll'
-__Version__ = '0.2'
+__Version__ = '0.3'
 __Date__ = '2026-04-09'
-__License__ = 'GPL 3.0'
+__License__ = 'GPL-3.0'
 __Web__ = 'https://github.com/DeltaFwulf/rocket-macro-fc'
 __Wiki__ = 'N/A'
 __Icon__ = 'MyMacro.svg, please put an svg file along side the macro, respecting the macro filename'
@@ -67,11 +75,13 @@ __Requires__ = 'FreeCAD >1.0'
 __Communication__ = 'https://github.com/DeltaFwulf/rocket-macro-fc/issues'
 __Files__ = ''
 
-# TODO: accept a 'forward' direction as +x, +y, +z, etc. to fit the user's project convention.
+
+
+# TODO: have nosecone point to +x by default (currently -x)
 # TODO: create a new document if one isn't already open
-# TODO: allow conics or ogives to choose a spherically blunted nose, with a check and radius line edit when setting up further inputs
 # TODO: if nosecone fails to generate, delete it?
-# TODO: add shape to body label
+
+
 
 class InputWindow(QWidget):
 
@@ -96,6 +106,8 @@ class InputWindow(QWidget):
 		self._inShoulderLength = QLineEdit()
 		self._inWallThickness = QLineEdit()
 		self._inCapShoulder = QCheckBox()
+		self._inForward = QComboBox()
+		self._inForward.addItems(['+x', '-x', '+y', '-y', '+z', '-z'])
 		
 		self._makeNosecone = QPushButton("Make Nosecone")
 		self._makeNosecone.clicked.connect(self.makeNosecone)
@@ -112,6 +124,7 @@ class InputWindow(QWidget):
 		comLayout.addRow('Shoulder Length', self._inShoulderLength)
 		comLayout.addRow('Wall Thickness', self._inWallThickness)
 		comLayout.addRow('Capped Shoulder', self._inCapShoulder)
+		comLayout.addRow('Forward Direction', self._inForward)
 		self.baseInputs.setLayout(comLayout)
 		
 		self.furtherInputs = QGroupBox("Further Inputs")
@@ -154,9 +167,10 @@ class InputWindow(QWidget):
 				self._inRho = QLineEdit()
 				layout.addRow("Ogive Radius", self._inRho)
 		
-		if shape in ['conic', 'biconic', 'tangent-ogive', 'secant-ogive']:
+		if shape in ['conic', 'biconic', 'tangent-ogive']:
 			self._inBlunt = QCheckBox()
 			self._inBluntRadius = QLineEdit()
+			self._inBluntRadius.setText('0.0')
 			layout.addRow("Blunted Tip", self._inBlunt)
 			layout.addRow("Tip Radius", self._inBluntRadius)
 				
@@ -176,14 +190,20 @@ class InputWindow(QWidget):
 			self.lShoulder = float(self._inShoulderLength.text())
 			self.tWall = float(self._inWallThickness.text())
 			self.capped = self._inCapShoulder.isChecked()
+			fwd = self._inForward.currentText()
 			
 		except:
 			print("One or more common inputs are missing, please check and try again.")
 			return
 			
+		try:
+			blunted = self._inBlunt.isChecked()
+		except:
+			blunted = False
+			
 		# Step 1: create a body named 'nosecone'
 		body = App.activeDocument().addObject('PartDesign::Body', 'nosecone')
-		body.Label = self.shape + ' nosecone'
+		body.Label = ('blunted ' if blunted else '') + self.shape + ' nosecone'
 		body.AllowCompound = False
 		App.ActiveDocument.recompute()
 				
@@ -204,12 +224,9 @@ class InputWindow(QWidget):
 		if out != 0:
 			print(f"Invalid inputs given for {self.shape}, check and try again.")
 			return
-		
-		i = len(profileSketch.Geometry)
-		for segment in self.plotInnerCurve():
-			profileSketch.addGeometry(segment, False)
+			
+		for i in range(len(profileSketch.Geometry)):
 			profileSketch.addConstraint(Sketcher.Constraint('Block', i))
-			i += 1
 			
 		App.ActiveDocument.recompute()
 				
@@ -230,7 +247,7 @@ class InputWindow(QWidget):
 		thickness.Intersection = 0
 		thickness.Join = 1
 		
-		# find the base face
+		# Step 5a: identify the rear shoulder face
 		for i in range(len(body.Shape.Faces)):
 			f = body.Shape.Faces[i]
 						
@@ -238,15 +255,67 @@ class InputWindow(QWidget):
 				thickness.Base = (App.ActiveDocument.ActiveObject.BaseFeature, ["Face" + str(i + 1),])
 				
 		App.ActiveDocument.recompute()
+		
+		# Step 6: apply end cap if selected
+		
+		# create the circular sketch
+		
+		# pad out wall thickness cap
+		
+		# Step 7: rotate the nosecone to the desired orientation				
+		match fwd:
+			case '+x':
+				rot = FreeCAD.Rotation(App.Vector(0, 1, 0), 180)
+			case '-x':
+				rot = FreeCAD.Rotation(App.Vector(0, 1, 0), 0)
+			case '+y':
+				rot = FreeCAD.Rotation(App.Vector(0, 0, 1), -90)
+			case '-y':
+				rot = FreeCAD.Rotation(App.Vector(0, 0, 1), 90)
+			case '+z':
+				rot = FreeCAD.Rotation(App.Vector(0, 1, 0), -90)
+			case '-z':
+				rot = FreeCAD.Rotation(App.Vector(0, 1, 0), 90)
+		
+		centre = App.Vector(0.0, 0.0, 0.0)
+		pos = body.Placement.Base
+		newPos = App.Placement(pos, rot, centre)
+		body.Placement = newPos
+		
+		App.ActiveDocument.recompute()
+		
 		print("Nosecone has been created")
 		
 				
 						
 	def conic(self, sketch:Sketcher.Sketch, **kwargs) -> int:
-		"""Draws the conic nosecone profile"""
 		
-		sketch.addGeometry(Part.LineSegment(App.Vector(0.0, 0.0), App.Vector(self.lCone, 0.5*self.dBase)), False)
-		sketch.addConstraint(Sketcher.Constraint('Block', 0))
+		try:
+			blunted = self._inBlunt.isChecked()
+			rTip = float(self._inBluntRadius.text())
+		except:
+			return 1
+			
+		xTip = 0.0
+		
+		if blunted:
+			
+			phi = atan(self.dBase / (2*self.lCone))
+			rBase = self.dBase / 2
+			xt = (2*rTip*self.lCone**2 / self.dBase)*sqrt(1 / (rBase**2 + self.lCone**2))
+			yt = xt*rBase / self.lCone
+						
+			centre = App.Vector(xt + sqrt(rTip**2 - yt**2), 0.0, 0.0)
+			xTip = centre[0] - rTip
+			dir = App.Vector(0.0, 0.0, 1.0)
+
+			sketch.addGeometry(Part.ArcOfCircle(Part.Circle(centre, dir, rTip), pi/ 2 + phi, pi), False)
+			sketch.addGeometry(Part.LineSegment(App.Vector(xt, yt), App.Vector(self.lCone, self.dBase / 2)), False)
+			
+		else:
+			sketch.addGeometry(Part.LineSegment(App.Vector(0.0, 0.0), App.Vector(self.lCone, 0.5*self.dBase)), False)
+
+		sketch.addGeometry(self.plotInnerCurve(xTip=xTip), False)
 		
 		return 0
 		
@@ -255,21 +324,98 @@ class InputWindow(QWidget):
 	def biconic(self, sketch:Sketcher.Sketch, **kwargs) -> int:
 		"""Draws the biconic specific profile."""
 		
+		xTip = 0.0
+		
 		try:
-			xnSplit = float(self._inSplitNorm.text())
-			dMid = float(self._inMidDiameter.text())
+			rMid = float(self._inMidDiameter.text()) / 2
+			blunted = self._inBlunt.isChecked()
+			rTip = float(self._inBluntRadius.text())
+			xMid = float(self._inSplitNorm.text())*self.lCone
+		except:
+			return 1
+					
+		pMid = App.Vector(xMid, rMid)
+		pBase = App.Vector(self.lCone, self.dBase / 2)
+		
+		if blunted:
+			
+			phi = atan(rMid / xMid)
+			xt = (rTip*xMid**2 / rMid)*sqrt(1 / (rMid**2 + xMid**2))
+			yt = xt*rMid / xMid
+						
+			centre = App.Vector(xt + sqrt(rTip**2 - yt**2), 0.0, 0.0)
+			xTip = centre[0] - rTip
+			dir = App.Vector(0.0, 0.0, 1.0)
+			
+			sketch.addGeometry(Part.ArcOfCircle(Part.Circle(centre, dir, rTip), pi / 2 + phi, pi), False)
+			sketch.addGeometry(Part.LineSegment(App.Vector(xt, yt), pMid), False)
+									
+		else:
+			sketch.addGeometry(Part.LineSegment(App.Vector(0.0, 0.0), pMid), False)
+		
+		sketch.addGeometry(Part.LineSegment(pMid, pBase), False)
+		
+		sketch.addGeometry(self.plotInnerCurve(xTip=xTip), False)
+		
+		
+		return 0
+		
+	
+		
+	def tangentOgive(self, sketch:Sketcher.Sketch, **kwargs) -> int:
+		
+		try:
+			blunted = self._inBlunt.isChecked()
+			rTip = float(self._inBluntRadius.text())
+		except:
+			return 1
+			
+		nPts = 50 if kwargs.get('nPoints') is None else kwargs.get('nPoints')
+		R = self.dBase / 2
+		xTip = 0.0
+		xt = 0.0
+		
+		if blunted:
+			x0 = self.lCone - sqrt((R - rTip)*(self.lCone**2 / R - rTip))
+			k = (self.lCone**2 - R**2) / (self.lCone**2 + R**2 - 2*R*rTip)
+			yt = rTip*k
+			xt = x0 - rTip*sqrt(1 - k**2)	
+			xTip = x0 - rTip
+			centre = App.Vector(x0, 0.0, 0.0)
+			dir = App.Vector(0.0, 0.0, 1.0)
+			
+			sketch.addGeometry(Part.ArcOfCircle(Part.Circle(centre, dir, rTip), pi / 2 + acos(yt / rTip), pi), False)
+						
+		rho = (R + self.lCone**2 / R) / 2
+		pts = np.zeros((nPts, 2), float)
+		pts[:, 0] = np.linspace(xt, self.lCone, nPts, endpoint=True)
+		pts[:, 1] = np.sqrt(rho**2 + pts[:, 0]*(2*self.lCone - pts[:, 0]) - self.lCone**2) + R - rho
+		sketch.addGeometry(self.makeBSpline(pts), False)
+		sketch.addGeometry(self.plotInnerCurve(xTip=xTip), False)
+		
+		return 0
+		
+		
+		
+	def secantOgive(self, sketch:Sketcher.Sketch, **kwargs) -> int:
+		"""Similar to the tangent ogive, but with rho != tangent value."""
+		
+		try:
+			rho = float(self._inRho.text())
 		except:
 			return 1
 		
-		pTip = App.Vector(0.0, 0.0)
-		pMid = App.Vector(xnSplit*self.lCone, dMid / 2)
-		pBase = App.Vector(self.lCone, self.dBase / 2)
-		
-		sketch.addGeometry(Part.LineSegment(pTip, pMid), False)
-		sketch.addGeometry(Part.LineSegment(pMid, pBase), False)
-		
-		sketch.addConstraint(Sketcher.Constraint('Block', 0))
-		sketch.addConstraint(Sketcher.Constraint('Block', 1))
+		nPts = 50 if kwargs.get('nPoints') is None else kwargs.get('nPoints')
+		R = self.dBase / 2
+		alpha = atan(R / self.lCone) - acos(sqrt(R**2 + self.lCone**2) / (2*rho))
+		xTip = 0.0
+		xt = 0.0
+			
+		pts = np.zeros((nPts, 2), float)
+		pts[:, 0] = np.linspace(xt, self.lCone, nPts, endpoint=True)
+		pts[:, 1] = np.sqrt(rho**2 - (pts[:, 0] - rho*cos(alpha))**2) + rho*sin(alpha)
+		sketch.addGeometry(self.makeBSpline(pts), False)
+		sketch.addGeometry(self.plotInnerCurve(xTip=xTip), False)
 		
 		return 0
 		
@@ -288,7 +434,7 @@ class InputWindow(QWidget):
 		pts[:, 0] = 0.5*self.lCone*(1 - np.cos(theta))
 		pts[:, 1] = 0.5*self.dBase / sqrt(pi) * np.sqrt(theta - 0.5*np.sin(2*theta) + C*np.sin(theta)**3)
 		sketch.addGeometry(self.makeBSpline(pts), False)
-		sketch.addConstraint(Sketcher.Constraint('Block', 0))
+		sketch.addGeometry(self.plotInnerCurve(), False)
 		
 		return 0	
 		
@@ -302,7 +448,7 @@ class InputWindow(QWidget):
 		pts[:, 0] = np.linspace(0, self.lCone, nPts, endpoint=True)
 		pts[:, 1] = (self.dBase / (2*self.lCone))*np.sqrt(pts[:, 0]*(2*self.lCone - pts[:, 0]))
 		sketch.addGeometry(self.makeBSpline(pts), False)
-		sketch.addConstraint(Sketcher.Constraint('Block', 0))
+		sketch.addGeometry(self.plotInnerCurve(), False)
 		
 		return 0
 		
@@ -320,7 +466,7 @@ class InputWindow(QWidget):
 		pts[:, 0] = np.linspace(0, self.lCone, nPts, endpoint=True)
 		pts[:, 1] = 0.5*self.dBase*(pts[:, 0] / self.lCone)**n
 		sketch.addGeometry(self.makeBSpline(pts), False)
-		sketch.addConstraint(Sketcher.Constraint('Block', 0))
+		sketch.addGeometry(self.plotInnerCurve(), False)
 		
 		return 0
 		
@@ -338,45 +484,7 @@ class InputWindow(QWidget):
 		pts[:, 0] = np.linspace(0, self.lCone, nPts, endpoint=True)
 		pts[:, 1] = (0.5*self.dBase / (2 - k))*(2*pts[:, 0] / self.lCone - k*(pts[:, 0] / self.lCone)**2)
 		sketch.addGeometry(self.makeBSpline(pts), False)
-		sketch.addConstraint(Sketcher.Constraint('Block', 0))
-		
-		return 0
-		
-		
-		
-	def tangentOgive(self, sketch:Sketcher.Sketch, **kwargs) -> int:
-		
-		r = self.dBase / 2
-		rho = (r + self.lCone**2 / r) / 2
-		
-		nPts = 50 if kwargs.get('nPoints') is None else kwargs.get('nPoints')
-		pts = np.zeros((nPts, 2), float)
-		pts[:, 0] = np.linspace(0, self.lCone, nPts, endpoint=True)
-		pts[:, 1] = np.sqrt(rho**2 + pts[:, 0]*(2*self.lCone - pts[:, 0]) - self.lCone**2) + r - rho
-		sketch.addGeometry(self.makeBSpline(pts), False)
-		sketch.addConstraint(Sketcher.Constraint('Block', 0))
-		
-		return 0
-		
-		
-		
-	def secantOgive(self, sketch:Sketcher.Sketch, **kwargs) -> int:
-		"""Similar to the tangent ogive, but with rho != tangent value."""
-		
-		try:
-			rho = float(self._inRho.text())
-		except:
-			return 1
-		
-		r = self.dBase / 2 
-		alpha = atan(r / self.lCone) - acos(sqrt(r**2 + self.lCone**2) / (2*rho))
-		
-		nPts = 50 if kwargs.get('nPoints') is None else kwargs.get('nPoints')
-		pts = np.zeros((nPts, 2), float)
-		pts[:, 0] = np.linspace(0, self.lCone, nPts, endpoint=True)
-		pts[:, 1] = np.sqrt(rho**2 - (pts[:, 0] - rho*cos(alpha))**2) + rho*sin(alpha)
-		sketch.addGeometry(self.makeBSpline(pts), False)
-		sketch.addConstraint(Sketcher.Constraint('Block', 0))
+		sketch.addGeometry(self.plotInnerCurve(), False)
 		
 		return 0
 		
@@ -409,10 +517,10 @@ class InputWindow(QWidget):
 		return spline
 		
 		
-	def plotInnerCurve(self) -> list[Part.LineSegment]:
+	def plotInnerCurve(self, xTip:float=0.0) -> list[Part.LineSegment]:
 		"""Returns the line segments for the inside of the nosecone and shoulder"""
 		
-		pCentreFront = App.Vector(0.0, 0.0)
+		pCentreFront = App.Vector(xTip, 0.0)
 		pCentreRear = App.Vector(self.lCone + self.lShoulder, 0.0)
 		pShoulderRear = App.Vector(self.lCone + self.lShoulder, 0.5*self.dShoulder)
 		pShoulderFront = App.Vector(self.lCone, 0.5*self.dShoulder)
