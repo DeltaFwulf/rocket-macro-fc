@@ -4,34 +4,74 @@ import PartDesignGui
 import Sketcher
 from PySide.QtGui import QWidget, QLabel, QLineEdit, QComboBox, QVBoxLayout, QFormLayout, QPushButton, QCheckBox, QGroupBox
 import numpy as np
-from math import pi, sqrt
+from math import pi, sqrt, sin, cos, acos, atan
 
-"""An automagic nosecone macro. This allows the user to select an aerodynamic profile and overall dimensions, and returns a nosecone of constant thickness, with either a capped or open shoulder base.
-   
-   Please note: at this time, the power series nosecone is unable to solve for thickness at low values of n.
-   Ogives (tangent and secant) are coming soon, as well as the option of spherically blunting the ogives and conic-type nosecones
-
-   Mathematical descriptions for the different nosecone profiles may be found here: https://en.wikipedia.org/wiki/Nose_cone_design
 """
+	Overview:
+	-----------------------------------------------------------------------------------------------
+   	Nosecone is a macro written to automagically(tm) create a parametric nosecone within a 
+	PartDesign body. The following aerodynamic profiles may be generated:
+	
+	- Conic
+	- Biconic
+	- Tangent Ogive
+	- Secant Ogive
+	- HAACK
+	- Power Series
+	- Elliptical
+	- Parabolic
+		
+   	Description of Nosecone Geometry:
+	-----------------------------------------------------------------------------------------------
+	The nosecone consists of the 'profile' section, and the 'shoulder' section. The profile is the 
+	pointy bit, with a specified profile curve.
+	
+	This curve has a given length and base diameter. The length is defined by the 'fineness ratio', 
+	which is the ratio between the length and base diameter, L / D.
+	
+	The shoulder section is used to locate the nosecone within a rocket's body tube. It is a 
+	cylindrical boss behind the profile section.
+	
+	If specified, the nosecone will be made hollow, with a constant wall thickness, making a much 
+	lighter component, with room for stowed components.
+	
+	Current Limitations:
+	-----------------------------------------------------------------------------------------------
+   	- Please note: at this time, the power series nosecone is unable to solve for thickness at low 
+	  values of n.
+	- Nosecones all point along the x axis; this will be changed in coming versions.
+	
+	Planned Features:
+	-----------------------------------------------------------------------------------------------
+	- Addition of a NoseCone object that allow recomputation by altering data fields.
+	- Arbitrary orientation
+	- Accepting VarSet variables as inputs
 
+	Other:
+	-----------------------------------------------------------------------------------------------
+   	For Mathematical Descriptions of profiles: https://en.wikipedia.org/wiki/Nose_cone_design
+"""
 
 __Name__ = 'Nosecone'
 __Comment__ = 'Draws a parametric nosecone for a rocket.'
 __Author__ = 'Michael Stoll'
-__Version__ = '0.1'
-__Date__ = '2026-04-08'
-__License__ = 'License identifier from https://spdx.org/licenses/, e.g. LGPL-2.0-or-later as FreeCAD, MIT, CC0-1.0'
-__Web__ = 'Associated web page'
-__Wiki__ = 'Associated wiki page'
+__Version__ = '0.2'
+__Date__ = '2026-04-09'
+__License__ = 'GPL 3.0'
+__Web__ = 'https://github.com/DeltaFwulf/rocket-macro-fc'
+__Wiki__ = 'N/A'
 __Icon__ = 'MyMacro.svg, please put an svg file along side the macro, respecting the macro filename'
-__Help__ = 'A short explanation how to use the macro, e.g. what to select before launching'
+__Help__ = 'To build a nosecone, open a standard file, run the macro, and select desired geometry by filling out the fields, then clicking the make nosecone button.'
 __Status__ = 'Alpha'
 __Requires__ = 'FreeCAD >1.0'
-__Communication__ = 'e.g. https://github.com/FreeCAD/FreeCAD-macros/issues/ if on the github'
-__Files__ = 'comma-separated list of files that should be installed together with this file, use paths relative to this file, do not include this file'
+__Communication__ = 'https://github.com/DeltaFwulf/rocket-macro-fc/issues'
+__Files__ = ''
 
 # TODO: accept a 'forward' direction as +x, +y, +z, etc. to fit the user's project convention.
 # TODO: create a new document if one isn't already open
+# TODO: allow conics or ogives to choose a spherically blunted nose, with a check and radius line edit when setting up further inputs
+# TODO: if nosecone fails to generate, delete it?
+# TODO: add shape to body label
 
 class InputWindow(QWidget):
 
@@ -43,7 +83,9 @@ class InputWindow(QWidget):
 						'haack':self.haack, 
 						'elliptical':self.elliptical, 
 						'power-series':self.powerSeries,
-						'parabolic':self.parabolic}
+						'parabolic':self.parabolic,
+						'tangent-ogive':self.tangentOgive,
+						'secant-ogive': self.secantOgive}
 		
 		self._inShape = QComboBox()
 		self._inShape.addItems([key for key in self.profiles.keys()])
@@ -85,29 +127,39 @@ class InputWindow(QWidget):
 		"""When a nosecone geometry is selected, this function runs, and adds required input fields if necessary."""
 		
 		self.mainLayout.itemAt(1).widget().deleteLater()
-	
 		furtherInputs = QGroupBox("Additional Inputs")
 		layout = QFormLayout()
+		shape = self._inShape.currentText()
 		
-		match self._inShape.currentText():
+		match shape:
 			case 'biconic':
 				self._inSplitNorm = QLineEdit()
 				self._inMidDiameter = QLineEdit()
 				layout.addRow("Normalised split location (0 = tip, 1 = base)", self._inSplitNorm)
 				layout.addRow("Mid diameter", self._inMidDiameter)
-				
+	
 			case 'haack':
 				self._inC = QLineEdit()							
 				layout.addRow("C (0 to 1)" , self._inC)
 				
 			case 'power-series':
-				self._inN = QLineEdit()
+				self._inN = QLineEdit()				
 				layout.addRow("n (0 to 1)", self._inN)
 				
 			case 'parabolic':
 				self._inK = QLineEdit()
 				layout.addRow("K' (0 to 1)", self._inK)
-
+				
+			case 'secant-ogive':
+				self._inRho = QLineEdit()
+				layout.addRow("Ogive Radius", self._inRho)
+		
+		if shape in ['conic', 'biconic', 'tangent-ogive', 'secant-ogive']:
+			self._inBlunt = QCheckBox()
+			self._inBluntRadius = QLineEdit()
+			layout.addRow("Blunted Tip", self._inBlunt)
+			layout.addRow("Tip Radius", self._inBluntRadius)
+				
 		furtherInputs.setLayout(layout)
 		self.mainLayout.insertWidget(1, furtherInputs)
 
@@ -131,7 +183,7 @@ class InputWindow(QWidget):
 			
 		# Step 1: create a body named 'nosecone'
 		body = App.activeDocument().addObject('PartDesign::Body', 'nosecone')
-		body.Label = 'nosecone'
+		body.Label = self.shape + ' nosecone'
 		body.AllowCompound = False
 		App.ActiveDocument.recompute()
 				
@@ -285,6 +337,44 @@ class InputWindow(QWidget):
 		pts = np.zeros((nPts, 2), float)
 		pts[:, 0] = np.linspace(0, self.lCone, nPts, endpoint=True)
 		pts[:, 1] = (0.5*self.dBase / (2 - k))*(2*pts[:, 0] / self.lCone - k*(pts[:, 0] / self.lCone)**2)
+		sketch.addGeometry(self.makeBSpline(pts), False)
+		sketch.addConstraint(Sketcher.Constraint('Block', 0))
+		
+		return 0
+		
+		
+		
+	def tangentOgive(self, sketch:Sketcher.Sketch, **kwargs) -> int:
+		
+		r = self.dBase / 2
+		rho = (r + self.lCone**2 / r) / 2
+		
+		nPts = 50 if kwargs.get('nPoints') is None else kwargs.get('nPoints')
+		pts = np.zeros((nPts, 2), float)
+		pts[:, 0] = np.linspace(0, self.lCone, nPts, endpoint=True)
+		pts[:, 1] = np.sqrt(rho**2 + pts[:, 0]*(2*self.lCone - pts[:, 0]) - self.lCone**2) + r - rho
+		sketch.addGeometry(self.makeBSpline(pts), False)
+		sketch.addConstraint(Sketcher.Constraint('Block', 0))
+		
+		return 0
+		
+		
+		
+	def secantOgive(self, sketch:Sketcher.Sketch, **kwargs) -> int:
+		"""Similar to the tangent ogive, but with rho != tangent value."""
+		
+		try:
+			rho = float(self._inRho.text())
+		except:
+			return 1
+		
+		r = self.dBase / 2 
+		alpha = atan(r / self.lCone) - acos(sqrt(r**2 + self.lCone**2) / (2*rho))
+		
+		nPts = 50 if kwargs.get('nPoints') is None else kwargs.get('nPoints')
+		pts = np.zeros((nPts, 2), float)
+		pts[:, 0] = np.linspace(0, self.lCone, nPts, endpoint=True)
+		pts[:, 1] = np.sqrt(rho**2 - (pts[:, 0] - rho*cos(alpha))**2) + rho*sin(alpha)
 		sketch.addGeometry(self.makeBSpline(pts), False)
 		sketch.addConstraint(Sketcher.Constraint('Block', 0))
 		
